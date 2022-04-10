@@ -5,14 +5,15 @@ import "./gnosis-safe/GnosisSafe.sol";
 
 /// @title A contract that allows voting on proposals based
 //  on the amount staked on a given Balancer pool.
-//  The proposals determine who can be a Owner of a Gnosis Safe
+//  The proposals determine who can be a Owner of a Gnosis Safe.
+//  A winning proposal can only be selected/executed once per votingTimeFrame
 contract Ballot {
     // This represents the information of a vote.
     // It is accessed by a mapping that links the address
     // of the voter to this information.
     struct VoterInfo {
+        uint256 lastVote; // timestamp of the last vote
         uint256 weight; // weight is accumulated by the stake amount in a Balancer Pool
-        uint256 vote; // index of the voted proposal
     }
 
     // This is a type for a single proposal.
@@ -28,6 +29,12 @@ contract Ballot {
 
     address payable public gnosisSafe;
 
+    uint256 public votingTimeframe;
+
+    // Timestamp of the previous winning proposal execution
+    // Is initiated at the timestamp of creation of the Ballot
+    uint256 public previousExecution;
+
     // This declares a state variable that
     // stores a `Voter` struct for each possible address.
     mapping(address => VoterInfo) public voters;
@@ -39,9 +46,26 @@ contract Ballot {
     /// the amount of tokens staked in `_balancerPool`.
     /// @param _balancerPool Address of the Balancer Pool to check the weight of votes
     /// @param _gnosisSafe Address of the Gnosis Safe to add/remove Owners
-    constructor(address _balancerPool, address payable _gnosisSafe) {
+    /// @param _votingTimeframe Amount of milliseconds until the next winner is decided
+    constructor(
+        address _balancerPool,
+        address payable _gnosisSafe,
+        uint256 _votingTimeframe
+    ) {
         balancerPool = _balancerPool;
         gnosisSafe = _gnosisSafe;
+        votingTimeframe = _votingTimeframe;
+        previousExecution = block.timestamp;
+    }
+
+    // Only allows the execution of a function after
+    // votingTimeframe milliseconds have elapsed since the previousExecution
+    modifier oncePerTimeframe() {
+        require(
+            previousExecution + votingTimeframe < block.timestamp,
+            "Too soon to call this function"
+        );
+        _;
     }
 
     // Create a proposal to add or remove a Gnosis Safe owner
@@ -61,25 +85,30 @@ contract Ballot {
         );
     }
 
+    // Get the voting weight of a given voter
     function getWeight(address voter) public returns (uint256) {}
 
     /// Vote on a given proposal.
     function vote(uint256 proposalId) external {
         address sender = msg.sender;
-        require(voters[sender].weight > 0, "Already voted");
         require(proposalId < proposals.length, "Invalid proposal");
+
+        require(
+            voters[sender].lastVote < previousExecution,
+            "Already voted in this timeframe"
+        );
 
         uint256 weight = getWeight(sender);
         require(weight > 0, "Has no right to vote");
 
         voters[sender].weight = weight;
-        voters[sender].vote = proposalId;
+        voters[sender].lastVote = block.timestamp;
         proposals[proposalId].voteCount += weight;
     }
 
     /// @dev Computes the winning proposal taking all
     /// previous votes into account and executes it.
-    function determineAndExecuteWinningProposal() public {
+    function determineAndExecuteWinningProposal() public oncePerTimeframe {
         uint256 winningVoteCount = 0;
         uint256 winningProposal = 0;
         for (uint256 p = 0; p < proposals.length; p++) {
@@ -96,6 +125,7 @@ contract Ballot {
             !proposals[winningProposal].executed,
             "Proposal already executed"
         );
+        previousExecution = block.timestamp;
         _executeProposal(winningProposal);
     }
 
